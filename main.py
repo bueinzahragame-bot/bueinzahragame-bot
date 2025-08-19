@@ -14,19 +14,65 @@ from telegram.ext import (
     ContextTypes,
 )
 
+# ---------- تنظیمات ----------
 from config import BOT_TOKEN, ADMIN_ID, DATA_FOLDER, SCORE_FILE
 
-# ------------- تنظیمات قابل تغییر -------------
-TURN_TIMEOUT = 100           # ثانیه زمان پاسخ
+# پارامترها (قابل تغییر)
+TURN_TIMEOUT = 90           # ثانیه زمان پاسخ
 SCORE_DARE = 2
 SCORE_TRUTH = 1
 PENALTY_NO_ANSWER = -1
 MAX_CHANGES_PER_TURN = 2
-AUTO_DELETE_SECONDS = 15     # مدت حذف پیام join/leave (ثانیه)
-# --------------------------------------------
+AUTO_DELETE_SECONDS = 15    # حذف خودکار پیام‌های اطلاع‌رسانی join/leave
+
+# ---------- state file ----------
+STATE_FILE = SCORE_FILE  # از کانفیگ استفاده می‌کنیم
+
+# ---------- global state ----------
+state = {"games": {}, "scores": {}}
+current_tasks: dict = {}  # chat_id -> asyncio.Task (واچرها)
+
+# ---------- کمک‌کننده‌ها ----------
+def save_state():
+    try:
+        with open(STATE_FILE, "w", encoding="utf-8") as f:
+            json.dump(state, f, ensure_ascii=False, indent=2)
+    except Exception:
+        pass
+
+
+def load_state():
+    global state
+    if os.path.exists(STATE_FILE):
+        try:
+            with open(STATE_FILE, "r", encoding="utf-8") as f:
+                state = json.load(f)
+        except Exception:
+            state = {"games": {}, "scores": {}}
+    else:
+        state = {"games": {}, "scores": {}}
+
+
+def is_admin(user_id) -> bool:
+    try:
+        return int(user_id) == int(ADMIN_ID)
+    except Exception:
+        return False
+
+
+def mention_html(uid: int, fallback: str = "کاربر") -> str:
+    return f"<a href='tg://user?id={uid}'>{fallback}</a>"
+
+
+def get_player_mention(user) -> str:
+    if user.username:
+        return f"@{user.username}"
+    return f"{user.first_name}"
+
 
 def qpath(name: str) -> str:
     return os.path.join(DATA_FOLDER, name) if DATA_FOLDER else name
+
 
 FILES = {
     "truth_boy": qpath("truth_boys.txt"),
@@ -35,27 +81,26 @@ FILES = {
     "dare_girl": qpath("dare_girls.txt"),
 }
 
-STATE_PATH = "state.json"
 
-def load_state():
-    if os.path.exists(STATE_PATH):
+def ensure_data_folder():
+    if DATA_FOLDER and not os.path.exists(DATA_FOLDER):
+        os.makedirs(DATA_FOLDER, exist_ok=True)
+
+
+def delete_later(bot, chat_id: int, message_id: int, delay: int = AUTO_DELETE_SECONDS):
+    async def _del():
         try:
-            with open(STATE_PATH, "r", encoding="utf-8") as f:
-                return json.load(f)
+            await asyncio.sleep(delay)
+            await bot.delete_message(chat_id=chat_id, message_id=message_id)
         except Exception:
-            return {"games": {}, "scores": {}}
-    return {"games": {}, "scores": {}}
+            pass
+    try:
+        asyncio.create_task(_del())
+    except Exception:
+        pass
 
-def save_state(s):
-    with open(STATE_PATH, "w", encoding="utf-8") as f:
-        json.dump(s, f, ensure_ascii=False, indent=2)
 
-state = load_state()
-
-# نگهداری تسک واچرها در حافظه (برای cancel)
-current_tasks: dict = {}  # chat_id -> asyncio.Task
-
-# نمونه سوال‌ها در صورت نبودن فایل — اینجا لیست‌های کاملِ ارسالیِ شما قرار گرفت
+# ---------- سوال‌ها (اگر فایل غایب بود، همین‌ها را بنویس) ----------
 def ensure_question_files():
     samples = {
         "truth_boy": [
@@ -104,7 +149,7 @@ def ensure_question_files():
             "بهترین خاطره ات از بچگی چیه؟",
             "بدترین اتفاقی که برات افتاده چی بوده؟",
             "چیزی هست که ازش خجالت بکشی؟",
-            "اگه یه آرزو داشته باشی، چی از خدا میخوای؟"
+            "اگه یه آرزو داشته باشی، چی از خدا میخوای؟",
         ],
         "truth_girl": [
             "دوست داری چندتا بچه داشته باشی؟",
@@ -145,7 +190,7 @@ def ensure_question_files():
             "الان چه لباسی پوشیدی؟",
             "بدترین حرکتی یه پسر می‌تونه بزنه و از چشمات میوفته؟",
             "پسر پولدار زشت یا پسر فقیر خوشتیپ",
-            "ادمین این گپ خیلی بی‌ادب/بی‌شعوره قبول داری؟"
+            "ادمین این گپ خیلی بی،شعوره قبول داری؟",
         ],
         "dare_boy": [
             "یک عکس از خودت با یک فیلتر خنده دار در گروه بفرست.",
@@ -161,10 +206,11 @@ def ensure_question_files():
             "8 ثانیه از محیطی که الان هستی فیلم بگیر و بفرست گروه",
             "به یکی از اعضای گپ بگو روشون کراش داری",
             "یک جوک خنده دار برای گروه تعریف کن.",
-            "دو عکس آخر گالری‌ات را به اشتراک بزار",
+            "عکس سعید طوسی رو دانلود کن و برای دو ساعت بزاز پروفایلت",
+            "دو عکس اخر گالریت رو به اشتراک بزار",
             "از صفحه گوشیت اسکرین بفرست",
-            "تو بیوگرافیت بنویس «این کاربر عقل ندارد» و بذار یک ساعت بمونه",
-            "وویس بگیر و سعی کن انگلیسی صحبت کنی"
+            "تو بیوگرافیت بنویس این کاربر عقل ندارد » و بزار یک ساعت بمونه",
+            "وویس بگیر و سعی کن انگلیسی صحبت کنی",
         ],
         "dare_girl": [
             "عکس از خودت با یک فیلتر خنده دار در گروه بفرست.",
@@ -179,33 +225,60 @@ def ensure_question_files():
             "وویس بگیر و صدای خر دربیار",
             "8 ثانیه از محیطی که الان هستی فیلم بگیر و بفرست گروه",
             "به یکی از اعضای گپ بگو روشون کراش داری",
-            "دو عکس آخر گالری‌ات را به اشتراک بزار",
+            "یک جوک خنده دار برای گروه تعریف کن.",
+            "عکس آنا در آرماس  رو دانلود کن و برای دو ساعت بزاز پروفایلت",
+            "دو عکس اخر گالریت رو به اشتراک بزار",
             "از صفحه گوشیت اسکرین بفرست",
-            "تو بیوگرافیت بنویس «این کاربر عقل ندارد» و بذار یک ساعت بمونه",
-            "وویس بگیر و سعی کن انگلیسی صحبت کنی"
+            "تو بیوگرافیت بنویس این کاربر عقل ندارد » و بزار یک ساعت بمونه",
+            "وویس بگیر وسعی کن انگلیسی صحبت کنی",
         ],
     }
+    # اگر فایل‌های سوال وجود نداشت، آن‌ها را ایجاد کن
     for key, path in FILES.items():
         if not os.path.exists(path):
             d = os.path.dirname(path)
             if d:
                 os.makedirs(d, exist_ok=True)
+            arr = samples.get(key, ["سوال نمونه"])
             with open(path, "w", encoding="utf-8") as f:
-                f.write("\n".join(samples.get(key, ["سوال نمونه"])))
+                f.write("\n".join(arr))
+
 
 def load_questions(fn: str):
-    if not fn or not os.path.exists(fn):
+    if fn in FILES:
+        path = FILES[fn]
+    else:
+        path = fn
+    if not path or not os.path.exists(path):
         return []
-    with open(fn, "r", encoding="utf-8") as f:
+    with open(path, "r", encoding="utf-8") as f:
         return [l.strip() for l in f if l.strip()]
 
-def is_admin(uid) -> bool:
-    try:
-        return int(uid) == int(ADMIN_ID)
-    except Exception:
-        return False
 
-def init_chat(chat_id: int):
+def get_random_question(qtype: str, avoid: Optional[str] = None) -> Optional[str]:
+    filename = {
+        "truth_boy": FILES["truth_boy"],
+        "truth_girl": FILES["truth_girl"],
+        "dare_boy": FILES["dare_boy"],
+        "dare_girl": FILES["dare_girl"],
+    }.get(qtype)
+    if not filename:
+        return None
+    qs = load_questions(filename)
+    if not qs:
+        return None
+    if avoid and len(qs) > 1:
+        q = random.choice(qs)
+        a = 0
+        while q == avoid and a < 6:
+            q = random.choice(qs)
+            a += 1
+        return q
+    return random.choice(qs)
+
+
+# ---------- مدیریت بازی ----------
+def init_game(chat_id: int):
     games = state.get("games", {})
     if str(chat_id) not in games:
         games[str(chat_id)] = {
@@ -219,51 +292,50 @@ def init_chat(chat_id: int):
             "last_group_msg_id": None,
         }
         state["games"] = games
-        save_state(state)
+        save_state()
+
 
 def add_score(uid, amount=1):
-    uid = str(uid)
-    if "scores" not in state:
-        state["scores"] = {}
-    if uid not in state["scores"]:
-        state["scores"][uid] = {"score": 0}
-    state["scores"][uid]["score"] += amount
-    save_state(state)
+    s = state.setdefault("scores", {})
+    k = str(uid)
+    if k not in s:
+        s[k] = {"score": 0}
+    s[k]["score"] += amount
+    save_state()
 
-def get_board(limit=10):
+
+def get_leaderboard(limit=10):
     items = []
     for uid, info in state.get("scores", {}).items():
         items.append((uid, info.get("score", 0)))
     items.sort(key=lambda x: x[1], reverse=True)
     return items[:limit]
 
-def mention_html(uid: int, fallback: str = "کاربر") -> str:
-    return f"<a href='tg://user?id={uid}'>{fallback}</a>"
 
-async def delete_later(bot, chat_id: int, message_id: int, delay: int = AUTO_DELETE_SECONDS):
-    try:
-        await asyncio.sleep(delay)
-        await bot.delete_message(chat_id=chat_id, message_id=message_id)
-    except Exception:
-        pass
-
-def pick_random_question(qtype: str, avoid: Optional[str] = None) -> Optional[str]:
-    fn = FILES.get(qtype, "")
-    qs = load_questions(fn)
-    if not qs:
+def next_player(chat_id: int) -> Optional[int]:
+    g = state["games"].get(str(chat_id))
+    if not g:
         return None
-    if avoid and len(qs) > 1:
-        q = random.choice(qs)
-        attempt = 0
-        while q == avoid and attempt < 6:
-            q = random.choice(qs)
-            attempt += 1
-        return q
-    return random.choice(qs)
+    if not g["players"]:
+        return None
+    g["idx"] = (g.get("idx", -1) + 1) % len(g["players"])
+    save_state()
+    return g["players"][g["idx"]]
 
-# ----------------- فرمان‌ها -----------------
+
+def current_player(chat_id: int) -> Optional[int]:
+    g = state["games"].get(str(chat_id))
+    if not g or not g.get("players"):
+        return None
+    idx = g.get("idx", -1)
+    if idx < 0 or idx >= len(g["players"]):
+        return None
+    return g["players"][idx]
+
+
+# ---------- فرمان‌ها ----------
 async def start_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    text = "سلام! 🎲 ربات جرأت یا حقیقت بوئین‌زهرا\nاز دکمه‌ها استفاده کن یا دستورها رو وارد کن."
+    text = "سلام! 🎲 ربات جرأت یا حقیقت\nاز دکمه‌ها استفاده کن یا دستورها رو وارد کن."
     kb = InlineKeyboardMarkup([
         [InlineKeyboardButton("🎯 پیوستن به بازی", callback_data="menu|join")],
         [InlineKeyboardButton("🚪 ترک بازی", callback_data="menu|leave"),
@@ -272,20 +344,22 @@ async def start_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
         [InlineKeyboardButton("🏆 جدول امتیازات", callback_data="menu|leaderboard"),
          InlineKeyboardButton("🆔 آیدی من", callback_data="menu|myid")],
     ])
-    chat_id = update.effective_chat.id
-    await context.bot.send_message(chat_id=chat_id, text=text, reply_markup=kb)
+    await context.bot.send_message(chat_id=update.effective_chat.id, text=text, reply_markup=kb)
+
 
 async def myid_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    user = update.effective_user
     try:
-        await context.bot.send_message(chat_id=update.effective_user.id, text=f"آیدی شما: {update.effective_user.id}")
-        await context.bot.send_message(chat_id=update.effective_chat.id, text="✅ پیغام به دایرکت شما ارسال شد.")
+        await context.bot.send_message(chat_id=user.id, text=f"آیدی شما: {user.id}")
+        await update.message.reply_text("✅ پیغام به دایرکت شما ارسال شد.")
     except Exception:
-        await context.bot.send_message(chat_id=update.effective_chat.id, text=f"آیدی شما: {update.effective_user.id}")
+        await update.message.reply_text(f"آیدی شما: {user.id}")
+
 
 async def join_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
     chat_id = update.effective_chat.id
     user = update.effective_user
-    init_chat(chat_id)
+    init_game(chat_id)
     g = state["games"][str(chat_id)]
     if user.id in g["players"]:
         try:
@@ -295,23 +369,25 @@ async def join_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return
     g["players"].append(user.id)
     g["change_count"][str(user.id)] = 0
-    save_state(state)
-    msg = await context.bot.send_message(chat_id=chat_id, text=f"✅ {user.first_name} به بازی اضافه شد. (تعداد: {len(g['players'])})")
-    asyncio.create_task(delete_later(context.bot, chat_id, msg.message_id, AUTO_DELETE_SECONDS))
+    save_state()
+    msg = await context.bot.send_message(chat_id=chat_id, text=f"✅ {get_player_mention(user)} به بازی اضافه شد. (تعداد: {len(g['players'])})")
+    delete_later(context.bot, chat_id, msg.message_id, AUTO_DELETE_SECONDS)
+
 
 async def leave_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
     chat_id = update.effective_chat.id
     user = update.effective_user
-    init_chat(chat_id)
+    init_game(chat_id)
     g = state["games"][str(chat_id)]
     if user.id not in g["players"]:
         await context.bot.send_message(chat_id=chat_id, text="❌ شما در لیست نیستید.")
         return
     g["players"].remove(user.id)
     g["change_count"].pop(str(user.id), None)
-    save_state(state)
-    msg = await context.bot.send_message(chat_id=chat_id, text=f"✅ {user.first_name} از بازی خارج شد. (تعداد: {len(g['players'])})")
-    asyncio.create_task(delete_later(context.bot, chat_id, msg.message_id, AUTO_DELETE_SECONDS))
+    save_state()
+    msg = await context.bot.send_message(chat_id=chat_id, text=f"✅ {get_player_mention(user)} از بازی خارج شد. (تعداد: {len(g['players'])})")
+    delete_later(context.bot, chat_id, msg.message_id, AUTO_DELETE_SECONDS)
+
 
 async def startgame_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user = update.effective_user
@@ -319,19 +395,21 @@ async def startgame_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not is_admin(user.id):
         await context.bot.send_message(chat_id=chat_id, text="فقط ادمین می‌تواند بازی را شروع کند.")
         return
-    init_chat(chat_id)
+    init_game(chat_id)
     g = state["games"][str(chat_id)]
     if not g["players"]:
         await context.bot.send_message(chat_id=chat_id, text="هیچ بازیکنی نیست. لطفاً /join کنید.")
         return
+    # shuffle players
     random.shuffle(g["players"])
     g["started"] = True
     g["idx"] = -1
     g["change_count"] = {str(uid): 0 for uid in g["players"]}
-    save_state(state)
+    save_state()
     await context.bot.send_message(chat_id=chat_id, text=f"🎮 بازی شروع شد — شرکت‌کنندگان: {len(g['players'])}")
     await asyncio.sleep(0.2)
     await do_next_turn(chat_id, context)
+
 
 async def stopgame_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user = update.effective_user
@@ -339,23 +417,28 @@ async def stopgame_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not is_admin(user.id):
         await context.bot.send_message(chat_id=chat_id, text="فقط ادمین می‌تواند بازی را متوقف کند.")
         return
-    init_chat(chat_id)
+    init_game(chat_id)
     g = state["games"][str(chat_id)]
     g["started"] = False
     g["awaiting"] = False
-    save_state(state)
+    save_state()
+    # cancel watcher
     t = current_tasks.get(chat_id)
     if t:
-        t.cancel()
+        try:
+            t.cancel()
+        except Exception:
+            pass
         current_tasks.pop(chat_id, None)
     try:
         if g.get("last_group_msg_id"):
             await context.bot.delete_message(chat_id=chat_id, message_id=g["last_group_msg_id"])
             g["last_group_msg_id"] = None
-            save_state(state)
+            save_state()
     except Exception:
         pass
     await context.bot.send_message(chat_id=chat_id, text="⏹ بازی متوقف شد.")
+
 
 async def remove_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user = update.effective_user
@@ -372,20 +455,21 @@ async def remove_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await context.bot.send_message(chat_id=chat_id, text="آیدی عددی وارد کنید.")
         return
     removed = False
-    for cid, g in state.get("games", {}).items():
-        if tid in g.get("players", []):
-            g["players"].remove(tid)
-            g["change_count"].pop(str(tid), None)
+    for cid, gg in state.get("games", {}).items():
+        if tid in gg.get("players", []):
+            gg["players"].remove(tid)
+            gg["change_count"].pop(str(tid), None)
             removed = True
     if removed:
-        save_state(state)
+        save_state()
         await context.bot.send_message(chat_id=chat_id, text="✅ حذف شد.")
     else:
         await context.bot.send_message(chat_id=chat_id, text="آن کاربر در بازی نیست.")
 
+
 async def leaderboard_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
     chat_id = update.effective_chat.id
-    items = get_board(10)
+    items = get_leaderboard(10)
     if not items:
         await context.bot.send_message(chat_id=chat_id, text="هیچ امتیازی ثبت نشده.")
         return
@@ -402,26 +486,71 @@ async def leaderboard_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
         i += 1
     await context.bot.send_message(chat_id=chat_id, text="\n".join(lines))
 
-# ----------------- جریان بازی -----------------
+
+# ---------- رد کردن نوبت (ادمین) ----------
+async def skip_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    user = update.effective_user
+    chat_id = update.effective_chat.id
+    if not is_admin(user.id):
+        await context.bot.send_message(chat_id=chat_id, text="فقط ادمین می‌تواند نوبت را رد کند.")
+        return
+    init_game(chat_id)
+    g = state["games"][str(chat_id)]
+    cur = current_player(chat_id)
+    if not cur:
+        await context.bot.send_message(chat_id=chat_id, text="نوبتی وجود ندارد یا بازی شروع نشده.")
+        return
+    # cancel watcher
+    t = current_tasks.get(chat_id)
+    if t:
+        try:
+            t.cancel()
+        except Exception:
+            pass
+        current_tasks.pop(chat_id, None)
+    g["awaiting"] = False
+    save_state()
+    try:
+        member = await context.bot.get_chat_member(chat_id, cur)
+        name = member.user.username and ("@" + member.user.username) or member.user.first_name
+    except Exception:
+        name = str(cur)
+    await context.bot.send_message(chat_id=chat_id, text=f"⏭️ ادمین {get_player_mention(user)} نوبت {mention_html(cur, name)} را رد کرد.", parse_mode=ParseMode.HTML)
+    await asyncio.sleep(0.2)
+    await do_next_turn(chat_id, context)
+
+
+# ---------- جریان اصلی بازی ----------
 async def do_next_turn(chat_id: int, context: ContextTypes.DEFAULT_TYPE):
-    init_chat(chat_id)
+    init_game(chat_id)
     g = state["games"][str(chat_id)]
     if not g["players"]:
         await context.bot.send_message(chat_id=chat_id, text="هیچ بازیکنی نیست. بازی متوقف می‌شود.")
         g["started"] = False
-        save_state(state)
+        save_state()
         return
     if not g.get("started"):
         return
 
-    g["idx"] = (g["idx"] + 1) % len(g["players"])
+    # cancel previous watcher if exists
+    prev = current_tasks.get(chat_id)
+    if prev:
+        try:
+            prev.cancel()
+        except Exception:
+            pass
+        current_tasks.pop(chat_id, None)
+
+    # advance index
+    g["idx"] = (g.get("idx", -1) + 1) % len(g["players"])
     pid = g["players"][g["idx"]]
     g["change_count"].setdefault(str(pid), 0)
     g["awaiting"] = True
     g["current_question"] = ""
     g["current_type"] = ""
-    save_state(state)
+    save_state()
 
+    # get display name
     mention_name = str(pid)
     try:
         member = await context.bot.get_chat_member(chat_id, pid)
@@ -429,40 +558,34 @@ async def do_next_turn(chat_id: int, context: ContextTypes.DEFAULT_TYPE):
     except Exception:
         mention_name = str(pid)
 
-    # اینجا به‌جای دو مرحله، چهار گزینه مستقیم نمایش داده می‌شود:
+    # send group prompt with 4 options + admin skip
     group_text = f"👤 نوبت: {mention_html(pid, mention_name)}\nشرکت‌کنندگان: {len(g['players'])}\nنوع سوال: انتخاب کن"
-    kb = InlineKeyboardMarkup(
-        [
-            [InlineKeyboardButton("حقیقت (پسر)", callback_data=f"set|truth_boy|{pid}"),
-             InlineKeyboardButton("حقیقت (دختر)", callback_data=f"set|truth_girl|{pid}")],
-            [InlineKeyboardButton("جرأت (پسر)", callback_data=f"set|dare_boy|{pid}"),
-             InlineKeyboardButton("جرأت (دختر)", callback_data=f"set|dare_girl|{pid}")]
-        ]
-    )
+    kb = InlineKeyboardMarkup([
+        [InlineKeyboardButton("حقیقت (پسر)", callback_data=f"set|truth_boy|{pid}"),
+         InlineKeyboardButton("حقیقت (دختر)", callback_data=f"set|truth_girl|{pid}")],
+        [InlineKeyboardButton("جرأت (پسر)", callback_data=f"set|dare_boy|{pid}"),
+         InlineKeyboardButton("جرأت (دختر)", callback_data=f"set|dare_girl|{pid}")],
+        [InlineKeyboardButton("⏭️ رد نوبت (ادمین)", callback_data=f"admin|skip|{pid}")]
+    ])
     try:
         msg = await context.bot.send_message(chat_id=chat_id, text=group_text, reply_markup=kb, parse_mode=ParseMode.HTML)
         g["last_group_msg_id"] = msg.message_id
-        save_state(state)
+        save_state()
     except Exception:
         pass
 
-    # cancel previous watcher
-    prev = current_tasks.get(chat_id)
-    if prev:
-        try:
-            prev.cancel()
-        except Exception:
-            pass
-
+    # start timeout watcher
     async def watcher(target_pid: int):
         try:
             await asyncio.sleep(TURN_TIMEOUT)
-            st = load_state()
-            g_local = st.get("games", {}).get(str(chat_id))
+            # reload to avoid race
+            load_state()
+            g_local = state.get("games", {}).get(str(chat_id))
             if g_local and g_local.get("started") and g_local.get("awaiting") and g_local.get("players") and g_local.get("players")[g_local.get("idx")] == target_pid:
+                # apply penalty
                 state["games"][str(chat_id)]["awaiting"] = False
                 add_score(target_pid, PENALTY_NO_ANSWER)
-                save_state(state)
+                save_state()
                 try:
                     member2 = await context.bot.get_chat_member(chat_id, target_pid)
                     mname = member2.user.username and ("@" + member2.user.username) or member2.user.first_name
@@ -476,9 +599,9 @@ async def do_next_turn(chat_id: int, context: ContextTypes.DEFAULT_TYPE):
                     )
                 except Exception:
                     pass
-                await asyncio.sleep(0.3)
+                await asyncio.sleep(0.2)
                 st2 = load_state()
-                g2 = st2.get("games", {}).get(str(chat_id))
+                g2 = state.get("games", {}).get(str(chat_id))
                 if g2 and g2.get("started"):
                     await do_next_turn(chat_id, context)
         except asyncio.CancelledError:
@@ -487,7 +610,8 @@ async def do_next_turn(chat_id: int, context: ContextTypes.DEFAULT_TYPE):
     task = asyncio.create_task(watcher(pid))
     current_tasks[chat_id] = task
 
-# ----------------- هندلر CallbackQuery (منو، set، resp) -----------------
+
+# ----------------- هندلر CallbackQuery (منو و دکمه‌ها) -----------------
 async def callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
     if not query or not query.data:
@@ -497,7 +621,7 @@ async def callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     parts = data.split("|")
     cmd = parts[0]
 
-    # منوها
+    # منوها (از /start)
     if cmd == "menu":
         sub = parts[1] if len(parts) > 1 else ""
         if sub == "join":
@@ -519,30 +643,88 @@ async def callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
             await myid_cmd(update, context)
             return
 
+    # admin actions from inline button
+    if cmd == "admin":
+        action = parts[1] if len(parts) > 1 else ""
+        target = int(parts[2]) if len(parts) > 2 and parts[2].isdigit() else None
+        chat_id = query.message.chat.id
+        user = query.from_user
+        if action == "skip":
+            if not is_admin(user.id):
+                try:
+                    await query.answer("فقط ادمین می‌تواند نوبت را رد کند.", show_alert=True)
+                except Exception:
+                    pass
+                return
+            init_game(chat_id)
+            g = state["games"][str(chat_id)]
+            cur = current_player(chat_id)
+            if not cur:
+                await context.bot.send_message(chat_id=chat_id, text="نوبتی وجود ندارد.")
+                return
+            # cancel watcher
+            t = current_tasks.get(chat_id)
+            if t:
+                try:
+                    t.cancel()
+                except Exception:
+                    pass
+                current_tasks.pop(chat_id, None)
+            g["awaiting"] = False
+            save_state()
+            try:
+                member = await context.bot.get_chat_member(chat_id, cur)
+                name = member.user.username and ("@" + member.user.username) or member.user.first_name
+            except Exception:
+                name = str(cur)
+            await context.bot.send_message(chat_id=chat_id, text=f"⏭️ ادمین {get_player_mention(user)} نوبت {mention_html(cur, name)} را رد کرد.", parse_mode=ParseMode.HTML)
+            # delete last group prompt if any
+            try:
+                if g.get("last_group_msg_id"):
+                    await context.bot.delete_message(chat_id=chat_id, message_id=g["last_group_msg_id"])
+                    g["last_group_msg_id"] = None
+                    save_state()
+            except Exception:
+                pass
+            await asyncio.sleep(0.2)
+            await do_next_turn(chat_id, context)
+            return
+
     # set|<qtype>|<pid>  -> نمایش سوال **در گروه**
     if cmd == "set":
         qtype = parts[1] if len(parts) > 1 else ""
         target = int(parts[2]) if len(parts) > 2 and parts[2].isdigit() else None
         chat_id = query.message.chat.id
         user = query.from_user
-        init_chat(chat_id)
+        init_game(chat_id)
         g = state["games"][str(chat_id)]
         try:
-            cur = g["players"][g["idx"]]
+            cur = current_player(chat_id)
         except Exception:
-            await context.bot.send_message(chat_id=chat_id, text="خطا در وضعیت بازی.")
+            cur = None
+        if cur is None or user.id != cur or target != cur:
+            try:
+                await query.answer("❌ نوبت شما نیست.", show_alert=True)
+            except Exception:
+                pass
             return
-        if user.id != cur or target != cur:
-            await context.bot.send_message(chat_id=chat_id, text="❌ نوبت شما نیست.")
-            return
-        q = pick_random_question(qtype, avoid=g.get("current_question", ""))
+
+        # delete the choose-message so player can't press again
+        try:
+            await query.message.delete()
+        except Exception:
+            pass
+
+        q = get_random_question(qtype, avoid=g.get("current_question", ""))
         if not q:
             await context.bot.send_message(chat_id=chat_id, text="سوال موجود نیست؛ ادمین لطفا فایل سوال را کامل کنه.")
             return
         g["current_question"] = q
         g["current_type"] = qtype
         g["awaiting"] = True
-        save_state(state)
+        save_state()
+
+        # group message with question and buttons
         group_kb = InlineKeyboardMarkup([
             [InlineKeyboardButton("✅ پاسخ دادم", callback_data=f"resp|done|{target}"),
              InlineKeyboardButton("🔄 تغییر سوال", callback_data=f"resp|change|{target}")],
@@ -557,9 +739,47 @@ async def callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 parse_mode=ParseMode.HTML
             )
             g["last_group_msg_id"] = msg.message_id
-            save_state(state)
+            save_state()
         except Exception:
-            await context.bot.send_message(chat_id=chat_id, text=f"📝 سوال:\n{q}", reply_markup=group_kb)
+            # fallback: reply
+            await query.message.reply_text(f"📝 سوال:\n{q}", reply_markup=group_kb)
+        # cancel previous watcher and start a new one for this question
+        prev = current_tasks.get(chat_id)
+        if prev:
+            try:
+                prev.cancel()
+            except Exception:
+                pass
+            current_tasks.pop(chat_id, None)
+
+        async def watcher_q(pid_target: int):
+            try:
+                await asyncio.sleep(TURN_TIMEOUT)
+                load_state()
+                g_local = state.get("games", {}).get(str(chat_id))
+                if g_local and g_local.get("started") and g_local.get("awaiting") and g_local.get("players") and g_local.get("players")[g_local.get("idx")] == pid_target:
+                    state["games"][str(chat_id)]["awaiting"] = False
+                    add_score(pid_target, PENALTY_NO_ANSWER)
+                    save_state()
+                    try:
+                        member2 = await context.bot.get_chat_member(chat_id, pid_target)
+                        mname = member2.user.username and ("@" + member2.user.username) or member2.user.first_name
+                    except Exception:
+                        mname = str(pid_target)
+                    try:
+                        await context.bot.send_message(chat_id=chat_id, text=f"⏱ {mention_html(pid_target, mname)} فرصت پاسخ را از دست داد — {PENALTY_NO_ANSWER} امتیاز کسر شد.", parse_mode=ParseMode.HTML)
+                    except Exception:
+                        pass
+                    await asyncio.sleep(0.2)
+                    st2 = load_state()
+                    g2 = state.get("games", {}).get(str(chat_id))
+                    if g2 and g2.get("started"):
+                        await do_next_turn(chat_id, context)
+            except asyncio.CancelledError:
+                return
+
+        task = asyncio.create_task(watcher_q(target))
+        current_tasks[chat_id] = task
         return
 
     # resp|action|pid
@@ -567,6 +787,7 @@ async def callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         action = parts[1] if len(parts) > 1 else ""
         target = int(parts[2]) if len(parts) > 2 and parts[2].isdigit() else None
         user = query.from_user
+        chat_id = query.message.chat.id
 
         # ensure correct user
         if user.id != target:
@@ -576,157 +797,142 @@ async def callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 pass
             return
 
-        # find the chat where this player is currently awaiting
-        game_chat_id = None
-        for cid_str, g in state.get("games", {}).items():
-            if user.id in g.get("players", []) and g.get("awaiting"):
-                try:
-                    if g["players"][g["idx"]] == user.id:
-                        game_chat_id = int(cid_str)
-                        break
-                except Exception:
-                    continue
-        if not game_chat_id:
-            await context.bot.send_message(chat_id=user.id, text="خطا: وضعیت بازی پیدا نشد.")
-            return
-
-        init_chat(game_chat_id)
-        g = state["games"][str(game_chat_id)]
-        # cancel watcher for this chat
-        t = current_tasks.get(game_chat_id)
+        init_game(chat_id)
+        g = state["games"][str(chat_id)]
+        # cancel watcher
+        t = current_tasks.get(chat_id)
         if t:
             try:
                 t.cancel()
             except Exception:
                 pass
-            current_tasks.pop(game_chat_id, None)
+            current_tasks.pop(chat_id, None)
 
         if action == "done":
             qtype = g.get("current_type", "")
-            if qtype.startswith("dare"):
+            if qtype and qtype.startswith("dare"):
                 add_score(user.id, SCORE_DARE)
                 pts = SCORE_DARE
             else:
                 add_score(user.id, SCORE_TRUTH)
                 pts = SCORE_TRUTH
             g["awaiting"] = False
-            save_state(state)
+            save_state()
             try:
-                await context.bot.send_message(chat_id=game_chat_id, text=f"✅ {mention_html(user.id, user.first_name)} پاسخ داد — +{pts} امتیاز.", parse_mode=ParseMode.HTML)
+                await context.bot.send_message(chat_id=chat_id, text=f"✅ {mention_html(user.id, user.first_name)} پاسخ داد — +{pts} امتیاز.", parse_mode=ParseMode.HTML)
             except Exception:
                 pass
             # cleanup last group prompt if exists
             try:
                 if g.get("last_group_msg_id"):
-                    await context.bot.delete_message(chat_id=game_chat_id, message_id=g["last_group_msg_id"])
+                    await context.bot.delete_message(chat_id=chat_id, message_id=g["last_group_msg_id"])
                     g["last_group_msg_id"] = None
-                    save_state(state)
+                    save_state()
             except Exception:
                 pass
             await asyncio.sleep(0.2)
-            await do_next_turn(game_chat_id, context)
+            await do_next_turn(chat_id, context)
             return
 
         if action == "no":
             add_score(user.id, PENALTY_NO_ANSWER)
             g["awaiting"] = False
-            save_state(state)
+            save_state()
             try:
-                await context.bot.send_message(chat_id=game_chat_id, text=f"⛔ {mention_html(user.id, user.first_name)} پاسخ نداد/نخواست — {PENALTY_NO_ANSWER} امتیاز.", parse_mode=ParseMode.HTML)
+                await context.bot.send_message(chat_id=chat_id, text=f"⛔ {mention_html(user.id, user.first_name)} پاسخ نداد/نخواست — {PENALTY_NO_ANSWER} امتیاز.", parse_mode=ParseMode.HTML)
             except Exception:
                 pass
             try:
                 if g.get("last_group_msg_id"):
-                    await context.bot.delete_message(chat_id=game_chat_id, message_id=g["last_group_msg_id"])
+                    await context.bot.delete_message(chat_id=chat_id, message_id=g["last_group_msg_id"])
                     g["last_group_msg_id"] = None
-                    save_state(state)
+                    save_state()
             except Exception:
                 pass
             await asyncio.sleep(0.2)
-            await do_next_turn(game_chat_id, context)
+            await do_next_turn(chat_id, context)
             return
 
         if action == "change":
             cnt = g["change_count"].get(str(user.id), 0)
             if cnt >= MAX_CHANGES_PER_TURN:
-                await context.bot.send_message(chat_id=game_chat_id, text="⚠️ دیگر نمی‌توانید سوال را تغییر دهید.")
+                await query.answer("⚠️ دیگر نمی‌توانید سوال را تغییر دهید.", show_alert=True)
                 return
             qtype = g.get("current_type", "")
-            q_new = pick_random_question(qtype, avoid=g.get("current_question", ""))
+            q_new = get_random_question(qtype, avoid=g.get("current_question", ""))
             if not q_new:
-                await context.bot.send_message(chat_id=game_chat_id, text="سوال موجود نیست؛ ادمین کاملش کنه.")
+                await context.bot.send_message(chat_id=chat_id, text="سوال موجود نیست؛ ادمین کاملش کنه.")
                 return
             g["current_question"] = q_new
             g["change_count"][str(user.id)] = cnt + 1
-            save_state(state)
-            group_kb = InlineKeyboardMarkup([
-                [InlineKeyboardButton("✅ پاسخ دادم", callback_data=f"resp|done|{user.id}"),
-                 InlineKeyboardButton("🔄 تغییر سوال", callback_data=f"resp|change|{user.id}")],
-                [InlineKeyboardButton("🚫 پاسخ نمیدهم", callback_data=f"resp|no|{user.id}")]
-            ])
-            # edit last group message if possible (حفظ دکمه‌ها)
+            save_state()
+            # update the group message (edit) if possible
             try:
                 if g.get("last_group_msg_id"):
                     await context.bot.edit_message_text(
-                        chat_id=game_chat_id,
+                        chat_id=chat_id,
                         message_id=g["last_group_msg_id"],
                         text=f"📝 سوال جدید برای {mention_html(user.id, user.first_name)}:\n\n{q_new}\n(تغییر: {g['change_count'][str(user.id)]}/{MAX_CHANGES_PER_TURN})\n⏳ {TURN_TIMEOUT} ثانیه فرصت دارید.",
-                        reply_markup=group_kb,
+                        reply_markup=InlineKeyboardMarkup([
+                            [InlineKeyboardButton("✅ پاسخ دادم", callback_data=f"resp|done|{user.id}"),
+                             InlineKeyboardButton("🔄 تغییر سوال", callback_data=f"resp|change|{user.id}")],
+                            [InlineKeyboardButton("🚫 پاسخ نمیدهم", callback_data=f"resp|no|{user.id}")]
+                        ]),
                         parse_mode=ParseMode.HTML
                     )
                 else:
-                    await context.bot.send_message(chat_id=game_chat_id, text=f"📝 سوال جدید:\n{q_new}", reply_markup=group_kb)
+                    # fallback: send new
+                    msg = await context.bot.send_message(chat_id=chat_id, text=f"📝 سوال جدید:\n{q_new}")
+                    g["last_group_msg_id"] = msg.message_id
+                    save_state()
             except Exception:
-                await context.bot.send_message(chat_id=game_chat_id, text=f"📝 سوال جدید:\n{q_new}")
+                try:
+                    await context.bot.send_message(chat_id=chat_id, text=f"📝 سوال جدید:\n{q_new}")
+                except Exception:
+                    pass
             # restart watcher
-            task = asyncio.create_task(do_restart_watch(game_chat_id, context, user.id))
-            current_tasks[game_chat_id] = task
+            async def restart_watcher():
+                try:
+                    await asyncio.sleep(TURN_TIMEOUT)
+                    st = load_state()
+                    g_local = state.get("games", {}).get(str(chat_id))
+                    if g_local and g_local.get("started") and g_local.get("awaiting") and g_local.get("players") and g_local.get("players")[g_local.get("idx")] == user.id:
+                        state["games"][str(chat_id)]["awaiting"] = False
+                        add_score(user.id, PENALTY_NO_ANSWER)
+                        save_state()
+                        try:
+                            member2 = await context.bot.get_chat_member(chat_id, user.id)
+                            mname = member2.user.username and ("@" + member2.user.username) or member2.user.first_name
+                        except Exception:
+                            mname = str(user.id)
+                        try:
+                            await context.bot.send_message(chat_id=chat_id, text=f"⏱ {mention_html(user.id, mname)} فرصت پاسخ را از دست داد — {PENALTY_NO_ANSWER} امتیاز کسر شد.", parse_mode=ParseMode.HTML)
+                        except Exception:
+                            pass
+                        await asyncio.sleep(0.2)
+                        st2 = load_state()
+                        g2 = state.get("games", {}).get(str(chat_id))
+                        if g2 and g2.get("started"):
+                            await do_next_turn(chat_id, context)
+                except asyncio.CancelledError:
+                    return
+            task = asyncio.create_task(restart_watcher())
+            current_tasks[chat_id] = task
             return
 
-    # fallback
+    # fallback: نادیده گرفتن
     try:
         await context.bot.send_message(chat_id=update.effective_chat.id, text="عملیات نامشخص یا منقضی شده.")
     except Exception:
         pass
 
-async def do_restart_watch(chat_id: int, context: ContextTypes.DEFAULT_TYPE, pid: int):
-    prev = current_tasks.get(chat_id)
-    if prev:
-        try:
-            prev.cancel()
-        except Exception:
-            pass
-    async def watcher():
-        try:
-            await asyncio.sleep(TURN_TIMEOUT)
-            st = load_state()
-            g_local = st.get("games", {}).get(str(chat_id))
-            if g_local and g_local.get("started") and g_local.get("awaiting") and g_local.get("players") and g_local.get("players")[g_local.get("idx")] == pid:
-                state["games"][str(chat_id)]["awaiting"] = False
-                add_score(pid, PENALTY_NO_ANSWER)
-                save_state(state)
-                try:
-                    member2 = await context.bot.get_chat_member(chat_id, pid)
-                    mname = member2.user.username and ("@" + member2.user.username) or member2.user.first_name
-                except Exception:
-                    mname = str(pid)
-                try:
-                    await context.bot.send_message(chat_id=chat_id, text=f"⏱ {mention_html(pid, mname)} فرصت پاسخ را از دست داد — {PENALTY_NO_ANSWER} امتیاز کسر شد.", parse_mode=ParseMode.HTML)
-                except Exception:
-                    pass
-                await asyncio.sleep(0.2)
-                st2 = load_state()
-                g2 = st2.get("games", {}).get(str(chat_id))
-                if g2 and g2.get("started"):
-                    await do_next_turn(chat_id, context)
-        except asyncio.CancelledError:
-            return
-    t = asyncio.create_task(watcher())
-    current_tasks[chat_id] = t
 
-# ----------------- بوت آپ و هَندلرها -----------------
+# ---------- main ----------
 def main():
+    load_state()
+    ensure_data_folder()
     ensure_question_files()
+
     app = ApplicationBuilder().token(BOT_TOKEN).build()
 
     # commands
@@ -739,12 +945,14 @@ def main():
     app.add_handler(CommandHandler("stopgame", stopgame_cmd))
     app.add_handler(CommandHandler("remove", remove_cmd))
     app.add_handler(CommandHandler("leaderboard", leaderboard_cmd))
+    app.add_handler(CommandHandler("skip", skip_cmd))
 
     # callback queries (all)
     app.add_handler(CallbackQueryHandler(callback_handler))
 
     print("Bot started")
     app.run_polling()
+
 
 if __name__ == "__main__":
     main()
